@@ -1,0 +1,883 @@
+-- KUKIRIN // TURBO — Neon Control Panel
+-- Place as a LocalScript in StarterPlayer > StarterPlayerScripts.
+-- Intended for your own Roblox Studio experience / authorized testing.
+-- Note: client-side CFrame movement may be overridden by server/network ownership.
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- Avoid duplicate GUIs if the script is re-run in Studio.
+local previousGui = playerGui:FindFirstChild("KukirinTurbo")
+if previousGui then
+    previousGui:Destroy()
+end
+
+-- SETTINGS
+local DEFAULTS = {
+    floatDistance = 20,
+    spinSpeed = 8,
+    numberOfSpins = 10,
+    repeatDelay = 2.5,
+    liftDuration = 0.7,
+    landDuration = 0.7,
+}
+
+local settings = table.clone(DEFAULTS)
+
+local running = false
+local busy = false
+local cancelId = 0
+local antiAFKEnabled = false
+local sessionStartedAt = nil
+local sessionElapsed = 0
+local lastRunStartedAt = nil
+local totalRuns = 0
+local currentPhase = "READY"
+local currentSpinProgress = 0
+local connections = {}
+
+-- COLORS
+local BLACK = Color3.fromRGB(9, 12, 13)
+local PANEL = Color3.fromRGB(20, 25, 25)
+local PANEL_LIGHT = Color3.fromRGB(29, 36, 34)
+local GREEN = Color3.fromRGB(153, 255, 0)
+local GREEN_DARK = Color3.fromRGB(54, 94, 20)
+local WHITE = Color3.fromRGB(240, 246, 236)
+local GRAY = Color3.fromRGB(142, 154, 144)
+local RED = Color3.fromRGB(255, 75, 75)
+local YELLOW = Color3.fromRGB(255, 197, 64)
+
+local function connect(signal, callback)
+    local c = signal:Connect(callback)
+    table.insert(connections, c)
+    return c
+end
+
+local function formatTime(seconds)
+    seconds = math.max(0, math.floor(seconds))
+    local h = math.floor(seconds / 3600)
+    local m = math.floor((seconds % 3600) / 60)
+    local s = seconds % 60
+    return string.format("%02d:%02d:%02d", h, m, s)
+end
+
+local function make(className, props, parent)
+    local obj = Instance.new(className)
+
+    for key, value in pairs(props or {}) do
+        obj[key] = value
+    end
+
+    obj.Parent = parent
+    return obj
+end
+
+local function round(parent, radius)
+    make("UICorner", {
+        CornerRadius = UDim.new(0, radius or 8)
+    }, parent)
+end
+
+local function stroke(parent, color, thickness, transparency)
+    return make("UIStroke", {
+        Color = color or GREEN,
+        Thickness = thickness or 1,
+        Transparency = transparency or 0,
+    }, parent)
+end
+
+-- GUI ROOT
+local gui = make("ScreenGui", {
+    Name = "KukirinTurbo",
+    ResetOnSpawn = false,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, playerGui)
+
+local frame = make("Frame", {
+    Name = "MainPanel",
+    Size = UDim2.fromOffset(360, 590),
+    Position = UDim2.new(0.5, -180, 0.5, -295),
+    BackgroundColor3 = BLACK,
+    BorderSizePixel = 0,
+    Active = true,
+}, gui)
+
+round(frame, 15)
+stroke(frame, GREEN, 2)
+
+local header = make("Frame", {
+    Name = "Header",
+    Size = UDim2.new(1, 0, 0, 82),
+    BackgroundColor3 = PANEL,
+    BorderSizePixel = 0,
+    Active = true,
+}, frame)
+
+round(header, 14)
+
+make("Frame", {
+    Size = UDim2.new(1, -2, 0, 4),
+    Position = UDim2.new(0, 1, 1, -4),
+    BackgroundColor3 = GREEN,
+    BorderSizePixel = 0,
+}, header)
+
+make("TextLabel", {
+    Position = UDim2.fromOffset(17, 8),
+    Size = UDim2.new(1, -34, 0, 34),
+    BackgroundTransparency = 1,
+    Text = "KUKIRIN // TURBO",
+    TextColor3 = GREEN,
+    TextSize = 25,
+    Font = Enum.Font.GothamBlack,
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, header)
+
+make("TextLabel", {
+    Position = UDim2.fromOffset(18, 44),
+    Size = UDim2.new(1, -36, 0, 19),
+    BackgroundTransparency = 1,
+    Text = "E-SCOOTER MOTION CONTROL  •  MK-V",
+    TextColor3 = GRAY,
+    TextSize = 10,
+    Font = Enum.Font.GothamBold,
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, header)
+
+-- Drag panel (mouse and touch)
+local dragging = false
+local dragInput, dragStart, startPosition
+
+connect(header.InputBegan, function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+
+        dragging = true
+        dragStart = input.Position
+        startPosition = frame.Position
+        dragInput = input
+    end
+end)
+
+connect(UserInputService.InputChanged, function(input)
+    if dragging and (
+        input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch
+    ) then
+        local delta = input.Position - dragStart
+
+        frame.Position = UDim2.new(
+            startPosition.X.Scale,
+            startPosition.X.Offset + delta.X,
+            startPosition.Y.Scale,
+            startPosition.Y.Offset + delta.Y
+        )
+    end
+end)
+
+connect(UserInputService.InputEnded, function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+
+        dragging = false
+    end
+end)
+
+local function label(text, y, height, color, size)
+    return make("TextLabel", {
+        Position = UDim2.fromOffset(17, y),
+        Size = UDim2.new(1, -34, 0, height or 20),
+        BackgroundTransparency = 1,
+        Text = text,
+        TextColor3 = color or WHITE,
+        TextSize = size or 12,
+        Font = Enum.Font.GothamBold,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, frame)
+end
+
+label("/// MOTION CONFIGURATION", 91, 20, GREEN, 12)
+
+local function settingBox(titleText, y, defaultValue)
+    label(titleText, y, 17, GRAY, 10)
+
+    local box = make("TextBox", {
+        Position = UDim2.fromOffset(17, y + 18),
+        Size = UDim2.new(1, -34, 0, 30),
+        BackgroundColor3 = PANEL_LIGHT,
+        BorderSizePixel = 0,
+        Text = tostring(defaultValue),
+        PlaceholderText = tostring(defaultValue),
+        TextColor3 = GREEN,
+        PlaceholderColor3 = GRAY,
+        TextSize = 15,
+        Font = Enum.Font.GothamBold,
+        ClearTextOnFocus = false,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, frame)
+
+    round(box, 7)
+
+    make("UIPadding", {
+        PaddingLeft = UDim.new(0, 10),
+        PaddingRight = UDim.new(0, 8),
+    }, box)
+
+    stroke(box, Color3.fromRGB(59, 78, 43), 1)
+
+    return box
+end
+
+local distanceBox = settingBox(
+    "FLOAT DISTANCE / STUDS (1–100)",
+    115,
+    DEFAULTS.floatDistance
+)
+
+local speedBox = settingBox(
+    "SPIN SPEED / ROTATIONS PER SECOND (0.1–20)",
+    169,
+    DEFAULTS.spinSpeed
+)
+
+local spinsBox = settingBox(
+    "FULL ROTATIONS (1–100)",
+    223,
+    DEFAULTS.numberOfSpins
+)
+
+local delayBox = settingBox(
+    "REPEAT DELAY / SECONDS (0–300)",
+    277,
+    DEFAULTS.repeatDelay
+)
+
+-- STATUS CARD
+local statusCard = make("Frame", {
+    Position = UDim2.fromOffset(17, 335),
+    Size = UDim2.new(1, -34, 0, 61),
+    BackgroundColor3 = PANEL,
+    BorderSizePixel = 0,
+}, frame)
+
+round(statusCard, 9)
+stroke(statusCard, Color3.fromRGB(55, 76, 44), 1)
+
+local statusDot = make("Frame", {
+    Position = UDim2.fromOffset(12, 14),
+    Size = UDim2.fromOffset(9, 9),
+    BackgroundColor3 = GREEN,
+    BorderSizePixel = 0,
+}, statusCard)
+
+round(statusDot, 9)
+
+local statusLabel = make("TextLabel", {
+    Position = UDim2.fromOffset(29, 8),
+    Size = UDim2.new(1, -39, 0, 20),
+    BackgroundTransparency = 1,
+    Text = "SYSTEM READY",
+    TextColor3 = GREEN,
+    TextSize = 12,
+    Font = Enum.Font.GothamBlack,
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, statusCard)
+
+local detailLabel = make("TextLabel", {
+    Position = UDim2.fromOffset(29, 30),
+    Size = UDim2.new(1, -39, 0, 18),
+    BackgroundTransparency = 1,
+    Text = "Waiting for START",
+    TextColor3 = GRAY,
+    TextSize = 10,
+    Font = Enum.Font.Gotham,
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, statusCard)
+
+local progressBack = make("Frame", {
+    Position = UDim2.fromOffset(17, 404),
+    Size = UDim2.new(1, -34, 0, 7),
+    BackgroundColor3 = PANEL_LIGHT,
+    BorderSizePixel = 0,
+    ClipsDescendants = true,
+}, frame)
+
+round(progressBack, 4)
+
+local progressFill = make("Frame", {
+    Size = UDim2.new(0, 0, 1, 0),
+    BackgroundColor3 = GREEN,
+    BorderSizePixel = 0,
+}, progressBack)
+
+round(progressFill, 4)
+
+local function setStatus(main, detail, color)
+    statusLabel.Text = main
+    detailLabel.Text = detail or ""
+    statusLabel.TextColor3 = color or GREEN
+    statusDot.BackgroundColor3 = color or GREEN
+end
+
+local function tweenProgress(value)
+    TweenService:Create(
+        progressFill,
+        TweenInfo.new(0.12, Enum.EasingStyle.Quad),
+        {
+            Size = UDim2.new(
+                math.clamp(value, 0, 1),
+                0,
+                1,
+                0
+            ),
+        }
+    ):Play()
+end
+
+local function button(text, x, y, width, color, textColor)
+    local b = make("TextButton", {
+        Position = UDim2.fromOffset(x, y),
+        Size = UDim2.fromOffset(width, 39),
+        BackgroundColor3 = color,
+        BorderSizePixel = 0,
+        Text = text,
+        TextColor3 = textColor or BLACK,
+        TextSize = 13,
+        Font = Enum.Font.GothamBlack,
+        AutoButtonColor = true,
+    }, frame)
+
+    round(b, 8)
+
+    return b
+end
+
+local startButton = button(
+    "▶  START", 17, 425, 158, GREEN, BLACK
+)
+
+local stopButton = button(
+    "■  STOP", 185, 425, 158, RED, BLACK
+)
+
+local afkButton = button(
+    "ANTI-AFK: OFF", 17, 472, 326, PANEL_LIGHT, GRAY
+)
+
+local timerLabel = label(
+    "SESSION  00:00:00", 520, 19, GREEN, 11
+)
+
+local statsLabel = label(
+    "RUNS COMPLETED: 0", 541, 17, GRAY, 10
+)
+
+local footer = label(
+    "KUKIRIN PERFORMANCE DIVISION  •  CLIENT BUILD",
+    565,
+    15,
+    GRAY,
+    8
+)
+
+footer.TextXAlignment = Enum.TextXAlignment.Center
+
+-- Validate all values before starting.
+local function readSettings()
+    local d = tonumber(distanceBox.Text)
+    local s = tonumber(speedBox.Text)
+    local n = tonumber(spinsBox.Text)
+    local delay = tonumber(delayBox.Text)
+
+    if not d or not s or not n or not delay
+        or d ~= d or s ~= s or n ~= n or delay ~= delay
+        or d < 1 or d > 100
+        or s < 0.1 or s > 20
+        or n < 1 or n > 100
+        or delay < 0 or delay > 300 then
+
+        setStatus(
+            "INVALID SETTINGS",
+            "Use values inside the ranges shown",
+            RED
+        )
+
+        return false
+    end
+
+    settings.floatDistance = d
+    settings.spinSpeed = s
+    settings.numberOfSpins = math.floor(n)
+    settings.repeatDelay = delay
+
+    return true
+end
+
+-- Find the character and, if seated, its vehicle model.
+local function getRide()
+    local character = player.Character
+
+    if not character then
+        return nil
+    end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local root = character:FindFirstChild("HumanoidRootPart")
+
+    if not humanoid or not root or humanoid.Health <= 0 then
+        return nil
+    end
+
+    local vehicle
+    local seat = humanoid.SeatPart
+
+    if seat then
+        local current = seat.Parent
+
+        while current and current ~= workspace do
+            if current:IsA("Model") then
+                vehicle = current
+                break
+            end
+
+            current = current.Parent
+        end
+    end
+
+    return humanoid, root, vehicle
+end
+
+local function animate(runId)
+    local humanoid, root, vehicle = getRide()
+
+    if not humanoid then
+        setStatus(
+            "CHARACTER NOT READY",
+            "Spawn and try START again",
+            YELLOW
+        )
+
+        return false
+    end
+
+    local useVehicle = vehicle ~= nil
+    local originalAutoRotate = humanoid.AutoRotate
+
+    local originalPivot = useVehicle
+        and vehicle:GetPivot()
+        or root.CFrame
+
+    local originalPosition = originalPivot.Position
+    local originalRotation = originalPivot.Rotation
+
+    local highPosition = originalPosition
+        + Vector3.new(0, settings.floatDistance, 0)
+
+    local finishedNormally = false
+
+    local function isCancelled()
+        return not running
+            or cancelId ~= runId
+            or not root.Parent
+            or humanoid.Health <= 0
+            or (useVehicle and not vehicle.Parent)
+    end
+
+    local function getCurrentPosition()
+        if useVehicle then
+            return vehicle:GetPivot().Position
+        end
+
+        return root.Position
+    end
+
+    -- Rotate around world Y while preserving starting orientation.
+    local function setPivot(position, angle)
+        if useVehicle then
+            if not vehicle.Parent then
+                return
+            end
+
+            vehicle:PivotTo(
+                CFrame.new(position)
+                    * CFrame.Angles(0, angle, 0)
+                    * originalRotation
+            )
+        else
+            if not root.Parent then
+                return
+            end
+
+            root.CFrame =
+                CFrame.new(position)
+                * CFrame.Angles(0, angle, 0)
+                * originalRotation
+        end
+    end
+
+    local function moveTo(target, duration, allowCancel)
+        local origin = getCurrentPosition()
+        local started = os.clock()
+
+        duration = math.max(duration, 0.01)
+
+        while true do
+            if not root.Parent
+                or humanoid.Health <= 0
+                or (useVehicle and not vehicle.Parent) then
+
+                return false
+            end
+
+            if allowCancel and isCancelled() then
+                return false
+            end
+
+            local alpha = math.clamp(
+                (os.clock() - started) / duration,
+                0,
+                1
+            )
+
+            local smooth = alpha * alpha * (3 - 2 * alpha)
+
+            setPivot(origin:Lerp(target, smooth), 0)
+            tweenProgress(alpha)
+
+            if alpha >= 1 then
+                break
+            end
+
+            RunService.Heartbeat:Wait()
+        end
+
+        return true
+    end
+
+    humanoid.AutoRotate = false
+
+    local ok, err = pcall(function()
+        setStatus(
+            "LIFTING",
+            useVehicle and "Moving seated vehicle" or "Moving character"
+        )
+
+        if not moveTo(highPosition, DEFAULTS.liftDuration, true) then
+            return
+        end
+
+        if isCancelled() then
+            return
+        end
+
+        setStatus(
+            "TURBO SPIN ACTIVE",
+            string.format(
+                "%d rotations • %.1f rps",
+                settings.numberOfSpins,
+                settings.spinSpeed
+            ),
+            GREEN
+        )
+
+        local totalTime = settings.numberOfSpins / settings.spinSpeed
+        local started = os.clock()
+
+        while true do
+            if isCancelled() then
+                return
+            end
+
+            local elapsed = math.min(
+                os.clock() - started,
+                totalTime
+            )
+
+            local angle = elapsed
+                * settings.spinSpeed
+                * math.pi
+                * 2
+
+            setPivot(highPosition, angle)
+            tweenProgress(elapsed / totalTime)
+
+            if elapsed >= totalTime then
+                break
+            end
+
+            RunService.Heartbeat:Wait()
+        end
+
+        finishedNormally = true
+    end)
+
+    -- Attempt to return to starting height if possible.
+    if root.Parent
+        and humanoid.Parent
+        and humanoid.Health > 0
+        and (not useVehicle or vehicle.Parent) then
+
+        setStatus(
+            "LANDING",
+            "Returning to starting position",
+            YELLOW
+        )
+
+        pcall(function()
+            moveTo(
+                originalPosition,
+                DEFAULTS.landDuration,
+                false
+            )
+        end)
+    end
+
+    if humanoid.Parent then
+        humanoid.AutoRotate = originalAutoRotate
+    end
+
+    if not ok then
+        warn("[KUKIRIN TURBO] Motion error: " .. tostring(err))
+
+        setStatus(
+            "MOTION ERROR",
+            "Check Output for details",
+            RED
+        )
+    end
+
+    tweenProgress(0)
+
+    return finishedNormally
+end
+
+local function stopMotion()
+    running = false
+    cancelId += 1
+
+    if sessionStartedAt then
+        sessionElapsed = os.clock() - sessionStartedAt
+        sessionStartedAt = nil
+
+        timerLabel.Text = "SESSION  " .. formatTime(sessionElapsed)
+    end
+
+    setStatus(
+        "STOPPING",
+        "Returning to starting height if possible",
+        RED
+    )
+end
+
+connect(startButton.Activated, function()
+    if busy then
+        return
+    end
+
+    if not readSettings() then
+        return
+    end
+
+    busy = true
+    running = true
+    cancelId += 1
+
+    local myRunId = cancelId
+
+    sessionStartedAt = os.clock()
+    sessionElapsed = 0
+    lastRunStartedAt = nil
+    totalRuns = 0
+
+    statsLabel.Text = "RUNS COMPLETED: 0"
+
+    setStatus(
+        "SYSTEM STARTING",
+        "Reading character and settings"
+    )
+
+    startButton.Text = "●  RUNNING"
+    startButton.BackgroundColor3 = GREEN_DARK
+    startButton.TextColor3 = WHITE
+
+    task.spawn(function()
+        while running and cancelId == myRunId do
+            lastRunStartedAt = os.clock()
+
+            local completed = animate(myRunId)
+
+            if completed then
+                totalRuns += 1
+                statsLabel.Text = "RUNS COMPLETED: " .. totalRuns
+            end
+
+            if not running or cancelId ~= myRunId then
+                break
+            end
+
+            local remaining = settings.repeatDelay
+
+            while running
+                and cancelId == myRunId
+                and remaining > 0 do
+
+                setStatus(
+                    "REPEAT WAIT",
+                    string.format(
+                        "Next run in %.1f seconds",
+                        remaining
+                    ),
+                    GREEN
+                )
+
+                local before = os.clock()
+
+                task.wait(math.min(0.1, remaining))
+
+                remaining -= os.clock() - before
+            end
+        end
+
+        busy = false
+        running = false
+
+        if sessionStartedAt then
+            sessionElapsed = os.clock() - sessionStartedAt
+            sessionStartedAt = nil
+
+            timerLabel.Text = "SESSION " .. formatTime(sessionElapsed)
+        end
+
+        startButton.Text = "▶  START"
+        startButton.BackgroundColor3 = GREEN
+        startButton.TextColor3 = BLACK
+
+        if gui.Parent then
+            setStatus(
+                "SYSTEM STOPPED",
+                "Ready for another run",
+                GRAY
+            )
+
+            tweenProgress(0)
+        end
+    end)
+end)
+
+connect(stopButton.Activated, stopMotion)
+
+connect(afkButton.Activated, function()
+    antiAFKEnabled = not antiAFKEnabled
+
+    if antiAFKEnabled then
+        afkButton.Text = "ANTI-AFK: ON"
+        afkButton.BackgroundColor3 = GREEN_DARK
+        afkButton.TextColor3 = GREEN
+
+        setStatus(
+            "ANTI-AFK FLAG ON",
+            "No idle-kick guarantee in this client",
+            YELLOW
+        )
+    else
+        afkButton.Text = "ANTI-AFK: OFF"
+        afkButton.BackgroundColor3 = PANEL_LIGHT
+        afkButton.TextColor3 = GRAY
+
+        setStatus(
+            "SYSTEM READY",
+            "Anti-AFK flag disabled",
+            GREEN
+        )
+    end
+end)
+
+-- Status-only toggle; this does not bypass Roblox idle enforcement.
+connect(player.CharacterAdded, function()
+    if running then
+        stopMotion()
+
+        setStatus(
+            "CHARACTER RESPAWNED",
+            "Motion stopped safely",
+            YELLOW
+        )
+    end
+end)
+
+-- Accurate elapsed timer.
+connect(RunService.Heartbeat, function()
+    if sessionStartedAt then
+        sessionElapsed = os.clock() - sessionStartedAt
+
+        timerLabel.Text = "SESSION  " .. formatTime(sessionElapsed)
+    end
+end)
+
+-- Gentle neon pulse on the outline.
+task.spawn(function()
+    while gui.Parent do
+        local outline = frame:FindFirstChildOfClass("UIStroke")
+
+        if not outline then
+            break
+        end
+
+        local fadeOut = TweenService:Create(
+            outline,
+            TweenInfo.new(
+                1.1,
+                Enum.EasingStyle.Sine,
+                Enum.EasingDirection.InOut
+            ),
+            {
+                Transparency = 0.45
+            }
+        )
+
+        fadeOut:Play()
+        fadeOut.Completed:Wait()
+
+        if not gui.Parent then
+            break
+        end
+
+        local fadeIn = TweenService:Create(
+            outline,
+            TweenInfo.new(
+                1.1,
+                Enum.EasingStyle.Sine,
+                Enum.EasingDirection.InOut
+            ),
+            {
+                Transparency = 0
+            }
+        )
+
+        fadeIn:Play()
+        fadeIn.Completed:Wait()
+    end
+end)
+
+-- Clean up event connections if the GUI is removed.
+connect(gui.Destroying, function()
+    running = false
+    cancelId += 1
+
+    for _, c in ipairs(connections) do
+        if c.Connected then
+            c:Disconnect()
+        end
+    end
+end)
+
+setStatus(
+    "SYSTEM READY",
+    "Set values, then press START",
+    GREEN
+)
